@@ -39,10 +39,23 @@ const DEMO_SCENES = [
   },
 ];
 
+const PIPELINE_STEPS = [
+  { key: 'extracting_frames', label: 'Extracting frames from video' },
+  { key: 'processing_poses', label: 'Computing camera poses (COLMAP)' },
+  { key: 'training', label: 'Training Gaussian Splatting model' },
+  { key: 'exporting', label: 'Exporting .splat file' },
+  { key: 'completed', label: 'Scene ready' },
+];
+
+const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? `${window.location.protocol}//${window.location.hostname}:8000`
+  : '/api';
+
 class App {
   constructor() {
     this.viewer = null;
     this.currentScene = null;
+    this.pollingInterval = null;
     this.init();
   }
 
@@ -67,6 +80,7 @@ class App {
 
   _setupUI() {
     this._setupUploadModal();
+    this._setupVideoUpload();
     this._setupControls();
     this._setupInfoPanel();
     this._setupViewpointsPanel();
@@ -83,7 +97,10 @@ class App {
     const urlInput = document.getElementById('url-input');
     const btnLoadUrl = document.getElementById('btn-load-url');
 
-    btnUpload.addEventListener('click', () => modal.classList.remove('hidden'));
+    btnUpload.addEventListener('click', () => {
+      modal.classList.remove('hidden');
+      this._checkBackendHealth();
+    });
     btnClose.addEventListener('click', () => modal.classList.add('hidden'));
     backdrop.addEventListener('click', () => modal.classList.add('hidden'));
 
@@ -128,6 +145,183 @@ class App {
         if (url) this._loadSceneFromUrl(url, 'Custom Scene');
       }
     });
+  }
+
+  _setupVideoUpload() {
+    const videoDropZone = document.getElementById('video-drop-zone');
+    const videoInput = document.getElementById('video-input');
+
+    videoDropZone.addEventListener('click', () => videoInput.click());
+    videoDropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      videoDropZone.classList.add('drag-over');
+    });
+    videoDropZone.addEventListener('dragleave', () => {
+      videoDropZone.classList.remove('drag-over');
+    });
+    videoDropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      videoDropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) this._handleVideoUpload(file);
+    });
+
+    videoInput.addEventListener('change', () => {
+      const file = videoInput.files[0];
+      if (file) this._handleVideoUpload(file);
+    });
+  }
+
+  async _handleVideoUpload(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext)) {
+      alert('Unsupported video format. Use .mp4, .mov, .avi, .mkv, or .webm');
+      return;
+    }
+
+    const quality = document.getElementById('train-quality').value;
+    const fps = document.getElementById('train-fps').value;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const params = new URLSearchParams({
+      max_iterations: quality,
+      target_fps: fps,
+    });
+
+    this._showPipelineStatus('Uploading video...');
+
+    try {
+      const response = await fetch(`${API_BASE}/api/upload/video?${params}`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: 'Upload failed' }));
+        throw new Error(err.detail || 'Upload failed');
+      }
+
+      const job = await response.json();
+      this._updateSceneTitle(file.name.replace(/\.[^.]+$/, ''));
+      this._pollJobStatus(job.job_id);
+    } catch (error) {
+      this._showPipelineError(error.message);
+    }
+  }
+
+  _pollJobStatus(jobId) {
+    if (this.pollingInterval) clearInterval(this.pollingInterval);
+
+    this.pollingInterval = setInterval(async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/jobs/${jobId}`);
+        if (!response.ok) throw new Error('Failed to get job status');
+
+        const job = await response.json();
+        this._updatePipelineUI(job);
+
+        if (job.status === 'completed') {
+          clearInterval(this.pollingInterval);
+          this.pollingInterval = null;
+          this._hidePipelineStatus();
+          const splatUrl = `${API_BASE}${job.output_url}`;
+          await this.viewer.loadScene(splatUrl);
+          document.getElementById('upload-modal').classList.add('hidden');
+        } else if (job.status === 'failed') {
+          clearInterval(this.pollingInterval);
+          this.pollingInterval = null;
+          this._showPipelineError(job.error || 'Pipeline failed');
+        }
+      } catch (error) {
+        console.error('Polling error:', error);
+      }
+    }, 2000);
+  }
+
+  _showPipelineStatus(message) {
+    const status = document.getElementById('pipeline-status');
+    const progress = document.getElementById('pipeline-progress');
+    const msg = document.getElementById('pipeline-message');
+    const steps = document.getElementById('pipeline-steps');
+
+    status.classList.remove('hidden');
+    progress.style.width = '5%';
+    msg.textContent = message;
+
+    steps.innerHTML = PIPELINE_STEPS.map(step => `
+      <div class="pipeline-step" data-step="${step.key}">
+        <div class="pipeline-step-dot"></div>
+        <span>${step.label}</span>
+      </div>
+    `).join('');
+  }
+
+  _updatePipelineUI(job) {
+    const progress = document.getElementById('pipeline-progress');
+    const msg = document.getElementById('pipeline-message');
+
+    progress.style.width = `${job.progress}%`;
+    msg.textContent = job.message;
+
+    const currentStatus = job.status;
+    let passedCurrent = false;
+    PIPELINE_STEPS.forEach(step => {
+      const el = document.querySelector(`.pipeline-step[data-step="${step.key}"]`);
+      if (!el) return;
+
+      el.classList.remove('active', 'done', 'failed');
+      if (step.key === currentStatus) {
+        el.classList.add('active');
+        passedCurrent = true;
+      } else if (!passedCurrent) {
+        el.classList.add('done');
+      }
+    });
+  }
+
+  _hidePipelineStatus() {
+    document.getElementById('pipeline-status').classList.add('hidden');
+  }
+
+  _showPipelineError(message) {
+    const msg = document.getElementById('pipeline-message');
+    msg.textContent = `Error: ${message}`;
+    msg.style.color = '#ef4444';
+
+    const steps = document.querySelectorAll('.pipeline-step.active');
+    steps.forEach(s => {
+      s.classList.remove('active');
+      s.classList.add('failed');
+    });
+  }
+
+  async _checkBackendHealth() {
+    const existing = document.querySelector('.backend-status');
+    if (existing) existing.remove();
+
+    try {
+      const response = await fetch(`${API_BASE}/api/health`, { signal: AbortSignal.timeout(3000) });
+      if (!response.ok) throw new Error('Backend not responding');
+      const data = await response.json();
+
+      const statusDiv = document.createElement('div');
+      statusDiv.className = `backend-status ${data.gpu ? 'ok' : 'error'}`;
+      if (data.gpu) {
+        statusDiv.textContent = 'GPU backend connected — video processing available';
+      } else if (data.nerfstudio) {
+        statusDiv.textContent = 'Backend connected (no GPU) — processing will be slow';
+      } else {
+        statusDiv.textContent = 'Backend connected — Nerfstudio not installed';
+      }
+      document.getElementById('tab-video').appendChild(statusDiv);
+    } catch {
+      const statusDiv = document.createElement('div');
+      statusDiv.className = 'backend-status error';
+      statusDiv.textContent = 'Backend not connected — start the API server to process videos';
+      document.getElementById('tab-video').appendChild(statusDiv);
+    }
   }
 
   _setupControls() {

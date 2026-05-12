@@ -126,11 +126,48 @@
       </div>
       <div class="modal-body">
         <div class="upload-tabs">
-          <button class="tab-btn active" data-tab="file">Local File</button>
+          <button class="tab-btn active" data-tab="video">Video</button>
+          <button class="tab-btn" data-tab="file">Splat File</button>
           <button class="tab-btn" data-tab="url">From URL</button>
           <button class="tab-btn" data-tab="demo">Demo Scenes</button>
         </div>
-        <div class="tab-content active" id="tab-file">
+        <div class="tab-content active" id="tab-video">
+          <div class="upload-drop-zone" id="video-drop-zone">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polygon points="23 7 16 12 23 17 23 7"/>
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+            </svg>
+            <p>Drop a video file here (.mp4, .mov, .avi)</p>
+            <p class="upload-hint">or click to browse — auto-generates 3D scene</p>
+            <input type="file" id="video-input" accept=".mp4,.mov,.avi,.mkv,.webm" hidden>
+          </div>
+          <div id="video-settings" class="upload-settings">
+            <div class="setting-row">
+              <label>Quality</label>
+              <select id="train-quality" class="select-input">
+                <option value="7000">Quick Demo (~5 min)</option>
+                <option value="15000" selected>Standard (~15 min)</option>
+                <option value="30000">High Quality (~30 min)</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label>Frame Rate</label>
+              <select id="train-fps" class="select-input">
+                <option value="1">1 fps (fewer frames)</option>
+                <option value="2" selected>2 fps (recommended)</option>
+                <option value="3">3 fps (more frames)</option>
+              </select>
+            </div>
+          </div>
+          <div id="pipeline-status" class="pipeline-status hidden">
+            <div class="pipeline-progress-bar">
+              <div class="pipeline-progress" id="pipeline-progress"></div>
+            </div>
+            <p id="pipeline-message">Processing...</p>
+            <div id="pipeline-steps" class="pipeline-steps"></div>
+          </div>
+        </div>
+        <div class="tab-content" id="tab-file">
           <div class="upload-drop-zone" id="drop-zone">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
