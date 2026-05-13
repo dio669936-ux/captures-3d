@@ -1,0 +1,125 @@
+{
+  "panoramas": [
+    {
+      "id": "pano_001",
+      "src": "panoramas/pano_001.jpg",
+      "label": "Viewpoint 1",
+      "x": 338,
+      "y": 720
+    },
+    {
+      "id": "pano_002",
+      "src": "panoramas/pano_002.jpg",
+      "label": "Viewpoint 2",
+      "x": 334,
+      "y": 677
+    },
+    {
+      "id": "pano_003",
+      "src": "panoramas/pano_003.jpg",
+      "label": "Viewpoint 3",
+      "x": 332,
+      "y": 635
+    },
+    {
+      "id": "pano_004",
+      "src": "panoramas/pano_004.jpg",
+      "label": "Viewpoint 4",
+      "x": 332,
+      "y": 593
+    },
+    {
+      "id": "pano_005",
+      "src": "panoramas/pano_005.jpg",
+      "label": "Viewpoint 5",
+      "x": 338,
+      "y": 551
+    },
+    {
+      "id": "pano_006",
+      "src": "panoramas/pano_006.jpg",
+      "label": "Viewpoint 6",
+      "x": 358,
+      "y": 513
+    },
+    {
+      "id": "pano_007",
+      "src": "panoramas/pano_007.jpg",
+      "label": "Viewpoint 7",
+      "x": 385,
+      "y": 480
+    },
+    {
+      "id": "pano_008",
+      "src": "panoramas/pano_008.jpg",
+      "label": "Viewpoint 8",
+      "x": 400,
+      "y": 441
+    },
+    {
+      "id": "pano_009",
+      "src": "panoramas/pano_009.jpg",
+      "label": "Viewpoint 9",
+      "x": 422,
+      "y": 405
+    },
+    {
+      "id": "pano_010",
+      "src": "panoramas/pano_010.jpg",
+      "label": "Viewpoint 10",
+      "x": 434,
+      "y": 364
+    },
+    {
+      "id": "pano_011",
+      "src": "panoramas/pano_011.jpg",
+      "label": "Viewpoint 11",
+      "x": 451,
+      "y": 325
+    },
+    {
+      "id": "pano_012",
+      "src": "panoramas/pano_012.jpg",
+      "label": "Viewpoint 12",
+      "x": 465,
+      "y": 285
+    },
+    {
+      "id": "pano_013",
+      "src": "panoramas/pano_013.jpg",
+      "label": "Viewpoint 13",
+      "x": 467,
+      "y": 243
+    },
+    {
+      "id": "pano_014",
+      "src": "panoramas/pano_014.jpg",
+      "label": "Viewpoint 14",
+      "x": 462,
+      "y": 201
+    },
+    {
+      "id": "pano_015",
+      "src": "panoramas/pano_015.jpg",
+      "label": "Viewpoint 15",
+      "x": 447,
+      "y": 162
+    },
+    {
+      "id": "pano_016",
+      "src": "panoramas/pano_016.jpg",
+      "label": "Viewpoint 16",
+      "x": 433,
+      "y": 121
+    },
+    {
+      "id": "pano_017",
+      "src": "panoramas/pano_017.jpg",
+      "label": "Viewpoint 17",
+      "x": 427,
+      "y": 80
+    }
+  ],
+  "canvasSize": 800,
+  "floorPlanImage": "floorplan.jpg"
+}
