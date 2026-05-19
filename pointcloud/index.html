@@ -344,6 +344,7 @@ function createWorker(self) {
 
     const rl = 3*4 + 3*4 + 4 + 4;
     const buffer = new ArrayBuffer(rl * vertexCount);
+    let cx = 0, cy = 0, cz = 0;
     for (let j = 0; j < vertexCount; j++) {
       row = sizeIndex[j];
       const position = new Float32Array(buffer, j*rl, 3);
@@ -367,6 +368,7 @@ function createWorker(self) {
       position[0] = attrs.x;
       position[1] = attrs.y;
       position[2] = attrs.z;
+      cx += attrs.x; cy += attrs.y; cz += attrs.z;
       if (types["f_dc_0"]) {
         const SH_C0 = 0.28209479177387814;
         rgba[0] = (0.5 + SH_C0 * attrs.f_dc_0) * 255;
@@ -383,7 +385,15 @@ function createWorker(self) {
         rgba[3] = 255;
       }
     }
-    return buffer;
+    cx /= vertexCount; cy /= vertexCount; cz /= vertexCount;
+    let maxR = 0;
+    const fb = new Float32Array(buffer);
+    for (let j = 0; j < vertexCount; j++) {
+      const dx = fb[j*8]-cx, dy = fb[j*8+1]-cy, dz = fb[j*8+2]-cz;
+      const r = dx*dx+dy*dy+dz*dz;
+      if (r > maxR) maxR = r;
+    }
+    return { buffer, center: [cx, cy, cz], radius: Math.sqrt(maxR) };
   }
 
   const throttledSort = () => {
@@ -402,9 +412,10 @@ function createWorker(self) {
     if (e.data.ply) {
       vertexCount = 0;
       runSort(viewProj);
-      buffer = processPlyBuffer(e.data.ply);
+      const result = processPlyBuffer(e.data.ply);
+      buffer = result.buffer;
       vertexCount = Math.floor(buffer.byteLength / rowLength);
-      postMessage({ buffer: buffer });
+      postMessage({ buffer: buffer, center: result.center, radius: result.radius });
     } else if (e.data.buffer) {
       buffer = e.data.buffer;
       vertexCount = e.data.vertexCount;
@@ -562,6 +573,17 @@ async function main() {
       splatData = new Uint8Array(e.data.buffer);
       totalVertices = Math.floor(splatData.length / rowLength);
       document.getElementById("v-count").textContent = totalVertices.toLocaleString();
+      if (e.data.center) {
+        const [cx, cy, cz] = e.data.center;
+        const r = e.data.radius || 5;
+        const dist = Math.max(r * 1.5, 2);
+        viewMatrix = [
+          1, 0, 0, 0,
+          0, 1, 0, 0,
+          0, 0, 1, 0,
+          -cx, -cy, -cz + dist, 1,
+        ];
+      }
     } else if (e.data.texdata) {
       const { texdata, texwidth, texheight } = e.data;
       gl.bindTexture(gl.TEXTURE_2D, texture);
