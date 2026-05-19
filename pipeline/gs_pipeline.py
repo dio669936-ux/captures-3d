@@ -193,6 +193,58 @@ def run_opensplat(project_dir, output_path, num_iters=5000, downscales=2):
         return False
 
 
+def _generate_depth_pointcloud(image_paths, output_path, num_points=500000):
+    """Fallback: generate depth-based point cloud from regular images."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+    from transformers import pipeline as hf_pipeline
+    import torch
+    sys.path.insert(0, str(Path(__file__).parent))
+    from pano360_to_ply import save_ply
+    
+    pipe = hf_pipeline("depth-estimation", 
+                     model="depth-anything/Depth-Anything-V2-Small-hf",
+                     device="cpu", dtype=torch.float32)
+    
+    all_pts, all_cols = [], []
+    pts_per = num_points // len(image_paths)
+    
+    for img_path in image_paths:
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        scale = min(512 / w, 512 / h)
+        img_s = cv2.resize(img, (int(w*scale), int(h*scale)))
+        sh, sw = img_s.shape[:2]
+        
+        pil_img = Image.fromarray(cv2.cvtColor(img_s, cv2.COLOR_BGR2RGB))
+        result = pipe(pil_img)
+        depth = np.array(result["depth"]).astype(np.float32)
+        d_min, d_max = depth.min(), depth.max()
+        if d_max > d_min:
+            depth = (depth - d_min) / (d_max - d_min)
+        
+        u, v = np.meshgrid(np.arange(sw), np.arange(sh))
+        z = (1.0 - depth) * 5.0 + 0.5
+        x = (u - sw/2) / sw * z * 2
+        y = -(v - sh/2) / sh * z * 2
+        
+        points = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=1)
+        colors = img_s.reshape(-1, 3)[:, ::-1] / 255.0
+        
+        if len(points) > pts_per:
+            idx = np.random.choice(len(points), pts_per, replace=False)
+            points, colors = points[idx], colors[idx]
+        
+        all_pts.append(points)
+        all_cols.append(colors)
+    
+    save_ply(output_path, np.vstack(all_pts), np.vstack(all_cols))
+    print(f"  Saved depth-based point cloud: {output_path}")
+
+
 def run_depth_pipeline(image_paths, output_path, num_points=500000):
     """Run depth-based pipeline for 360° panoramas (no COLMAP needed)."""
     sys.path.insert(0, str(Path(__file__).parent))
@@ -362,9 +414,12 @@ Examples:
         else:
             # Regular images → COLMAP + OpenSplat
             img_dir = f"{work_dir}/images"
-            os.makedirs(img_dir, exist_ok=True)
-            for f in files:
-                shutil.copy2(str(f), img_dir)
+            # If images are already in work_dir/images, skip copy
+            src_dir = str(Path(files[0]).parent.resolve())
+            if src_dir != str(Path(img_dir).resolve()):
+                os.makedirs(img_dir, exist_ok=True)
+                for f in files:
+                    shutil.copy2(str(f), img_dir)
             
             print("\nRunning COLMAP on images...")
             colmap_ok = run_colmap(work_dir, img_dir)
@@ -373,9 +428,12 @@ Examples:
                 print("\nTraining Gaussian Splatting...")
                 run_opensplat(work_dir, args.output, args.num_iters)
             else:
-                print("Error: COLMAP reconstruction failed.")
-                print("Tips: Ensure images have >50% overlap and different viewpoints")
-                sys.exit(1)
+                print("\nCOLMAP failed → falling back to depth-based point cloud...")
+                print("Tips for better results: use video with camera movement, not static photos")
+                # Fall back to depth-based approach
+                from pano360_to_ply import save_ply
+                _generate_depth_pointcloud(files, args.output, args.num_points)
+
     
     elif input_type == "single_image":
         if is_pano:
