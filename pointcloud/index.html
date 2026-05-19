@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>3D Point Cloud Viewer — Captures 3D</title>
+  <title>3D Gaussian Splat Viewer — Captures 3D</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0a0a0a; color: #fff; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; }
@@ -61,22 +61,35 @@
     }
     #point-size-ctrl label { font-size: 12px; color: rgba(255,255,255,0.6); display: block; margin-bottom: 4px; }
     #point-size-ctrl input[type=range] { width: 120px; }
+    #format-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 4px;
+      font-size: 11px; font-weight: 600; margin-left: 6px;
+    }
+    .badge-gs { background: rgba(76,175,80,0.3); color: #81c784; }
+    .badge-pc { background: rgba(79,195,247,0.3); color: #4fc3f7; }
+    #drop-zone {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(79,195,247,0.1); border: 3px dashed #4fc3f7;
+      display: none; align-items: center; justify-content: center;
+      z-index: 200; font-size: 24px; color: #4fc3f7;
+    }
   </style>
 </head>
 <body>
   <div id="loading">
     <div class="spinner"></div>
-    <h2>Loading Point Cloud</h2>
+    <h2>Loading 3D Scene</h2>
     <div id="loading-status">Initializing...</div>
   </div>
 
+  <div id="drop-zone">Drop .ply or .splat file here</div>
   <div id="viewer"></div>
 
   <div id="hud">
-    <h2>3D Point Cloud</h2>
+    <h2>3D Viewer <span id="format-badge"></span></h2>
     <div class="stat">Points: <b id="stat-points">--</b></div>
-    <div class="stat">Source: <b id="stat-source">Depth Anything V2</b></div>
-    <div class="stat">Frames: <b id="stat-frames">1 panorama (360°)</b></div>
+    <div class="stat">Source: <b id="stat-source">--</b></div>
+    <div class="stat">Format: <b id="stat-format">--</b></div>
     <div class="stat">Cutaway: <b id="stat-cutaway">OFF</b></div>
   </div>
 
@@ -86,17 +99,17 @@
     <kbd>Scroll</kbd> Zoom &nbsp;
     <kbd>R</kbd> Reset &nbsp;
     <kbd>C</kbd> Cutaway &nbsp;
-    <kbd>↑↓</kbd> Cut height
+    <kbd>&#8593;&#8595;</kbd> Cut height
   </div>
 
   <button id="upload-btn" onclick="document.getElementById('file-upload').click()">
-    📂 Upload PLY
-    <input type="file" id="file-upload" accept=".ply" hidden>
+    Upload .ply / .splat
+    <input type="file" id="file-upload" accept=".ply,.splat" hidden>
   </button>
 
   <div id="point-size-ctrl">
     <label>Point Size</label>
-    <input type="range" id="point-size" min="0.5" max="8" step="0.5" value="2">
+    <input type="range" id="point-size" min="0.5" max="10" step="0.5" value="2">
     <label style="margin-top:8px">Cut Height</label>
     <input type="range" id="cut-height" min="-100" max="100" step="1" value="100">
     <button id="cutaway-btn" style="margin-top:8px;width:100%;padding:6px;background:rgba(79,195,247,0.2);color:#4fc3f7;border:1px solid rgba(79,195,247,0.3);border-radius:6px;cursor:pointer;font-size:12px">Toggle Cutaway (C)</button>
@@ -113,17 +126,15 @@
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-    import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 
     const container = document.getElementById('viewer');
     const loadingEl = document.getElementById('loading');
     const loadingStatus = document.getElementById('loading-status');
 
-    // Scene setup
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0a0a0a);
 
-    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 500);
     camera.position.set(5, 8, 5);
     camera.lookAt(0, 0, 0);
 
@@ -137,21 +148,231 @@
     controls.dampingFactor = 0.08;
     controls.target.set(0, 0, 0);
 
-    // Grid helper
     const grid = new THREE.GridHelper(30, 30, 0x333333, 0x1a1a1a);
     scene.add(grid);
-
-    // Axes helper
     const axes = new THREE.AxesHelper(2);
     scene.add(axes);
 
     let pointCloud = null;
     let pointMaterial = null;
     let cutawayEnabled = false;
-    let cutHeight = 100; // percentage, 100 = no cut
+    let cutHeight = 100;
     let originalPositions = null;
     let originalColors = null;
-    let clippingPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 100);
+
+    // SH coefficient for DC component
+    const SH_C0 = 0.28209479177387814;
+
+    // Custom binary PLY parser that handles both regular and Gaussian Splatting formats
+    function parsePLYBuffer(buffer) {
+      const bytes = new Uint8Array(buffer);
+
+      // Find end of header
+      let headerEnd = -1;
+      for (let i = 0; i < Math.min(bytes.length, 10000); i++) {
+        if (bytes[i] === 0x65 && bytes[i+1] === 0x6e && bytes[i+2] === 0x64 &&
+            bytes[i+3] === 0x5f && bytes[i+4] === 0x68 && bytes[i+5] === 0x65 &&
+            bytes[i+6] === 0x61 && bytes[i+7] === 0x64 && bytes[i+8] === 0x65 &&
+            bytes[i+9] === 0x72) {
+          // Found "end_header"
+          headerEnd = i + 10;
+          // Skip newline
+          while (headerEnd < bytes.length && (bytes[headerEnd] === 10 || bytes[headerEnd] === 13)) headerEnd++;
+          break;
+        }
+      }
+      if (headerEnd === -1) throw new Error('Invalid PLY: no end_header found');
+
+      const headerStr = new TextDecoder().decode(bytes.slice(0, headerEnd));
+      const headerLines = headerStr.split('\n').map(l => l.trim());
+
+      const isBinary = headerStr.includes('format binary_little_endian');
+      const isAscii = headerStr.includes('format ascii');
+
+      // Parse vertex count
+      let vertexCount = 0;
+      for (const line of headerLines) {
+        const m = line.match(/^element vertex (\d+)/);
+        if (m) { vertexCount = parseInt(m[1]); break; }
+      }
+      if (vertexCount === 0) throw new Error('No vertices found in PLY');
+
+      // Parse properties
+      const properties = [];
+      let inVertex = false;
+      for (const line of headerLines) {
+        if (line.startsWith('element vertex')) { inVertex = true; continue; }
+        if (line.startsWith('element ') && !line.startsWith('element vertex')) { inVertex = false; continue; }
+        if (inVertex && line.startsWith('property')) {
+          const parts = line.split(/\s+/);
+          const type = parts[1];
+          const name = parts[2];
+          let byteSize = 4;
+          if (type === 'float' || type === 'float32') byteSize = 4;
+          else if (type === 'double' || type === 'float64') byteSize = 8;
+          else if (type === 'uchar' || type === 'uint8') byteSize = 1;
+          else if (type === 'char' || type === 'int8') byteSize = 1;
+          else if (type === 'short' || type === 'int16') byteSize = 2;
+          else if (type === 'ushort' || type === 'uint16') byteSize = 2;
+          else if (type === 'int' || type === 'int32') byteSize = 4;
+          else if (type === 'uint' || type === 'uint32') byteSize = 4;
+          properties.push({ name, type, byteSize });
+        }
+      }
+
+      // Calculate stride and offsets
+      let stride = 0;
+      const offsets = {};
+      for (const prop of properties) {
+        offsets[prop.name] = stride;
+        stride += prop.byteSize;
+      }
+
+      // Detect format
+      const isGaussianSplat = 'f_dc_0' in offsets;
+      const hasRGB = 'red' in offsets && 'green' in offsets && 'blue' in offsets;
+      const hasDiffuseRGB = 'diffuse_red' in offsets;
+      const hasOpacity = 'opacity' in offsets;
+
+      const formatName = isGaussianSplat ? 'Gaussian Splatting' : (hasRGB ? 'Point Cloud (RGB)' : 'Point Cloud');
+
+      console.log(`PLY format: ${formatName}, ${vertexCount} vertices, stride=${stride}, props=${properties.length}`);
+
+      // Parse binary data
+      if (!isBinary) {
+        // ASCII fallback - parse text
+        return parseASCII(headerStr, buffer, headerEnd, vertexCount, properties, offsets, isGaussianSplat, hasRGB, hasDiffuseRGB, formatName);
+      }
+
+      const dataView = new DataView(buffer, headerEnd);
+      const positions = new Float32Array(vertexCount * 3);
+      const colors = new Float32Array(vertexCount * 3);
+      const opacities = hasOpacity ? new Float32Array(vertexCount) : null;
+
+      function readProp(vertexOffset, propName, propType) {
+        const off = vertexOffset + offsets[propName];
+        const prop = properties.find(p => p.name === propName);
+        if (!prop) return 0;
+        switch (prop.type) {
+          case 'float': case 'float32': return dataView.getFloat32(off, true);
+          case 'double': case 'float64': return dataView.getFloat64(off, true);
+          case 'uchar': case 'uint8': return dataView.getUint8(off);
+          case 'char': case 'int8': return dataView.getInt8(off);
+          case 'short': case 'int16': return dataView.getInt16(off, true);
+          case 'ushort': case 'uint16': return dataView.getUint16(off, true);
+          case 'int': case 'int32': return dataView.getInt32(off, true);
+          case 'uint': case 'uint32': return dataView.getUint32(off, true);
+          default: return dataView.getFloat32(off, true);
+        }
+      }
+
+      // Filter by opacity for GS (skip very transparent gaussians)
+      let validCount = 0;
+      const tempPositions = new Float32Array(vertexCount * 3);
+      const tempColors = new Float32Array(vertexCount * 3);
+
+      for (let i = 0; i < vertexCount; i++) {
+        const vOff = i * stride;
+
+        // Read opacity and filter (sigmoid activation for GS)
+        let alpha = 1.0;
+        if (isGaussianSplat && hasOpacity) {
+          const rawOpacity = readProp(vOff, 'opacity', 'float');
+          alpha = 1.0 / (1.0 + Math.exp(-rawOpacity)); // sigmoid
+          if (alpha < 0.05) continue; // skip nearly transparent
+        }
+
+        // Positions
+        tempPositions[validCount * 3] = readProp(vOff, 'x');
+        tempPositions[validCount * 3 + 1] = readProp(vOff, 'y');
+        tempPositions[validCount * 3 + 2] = readProp(vOff, 'z');
+
+        // Colors
+        if (isGaussianSplat) {
+          const f0 = readProp(vOff, 'f_dc_0');
+          const f1 = readProp(vOff, 'f_dc_1');
+          const f2 = readProp(vOff, 'f_dc_2');
+          tempColors[validCount * 3]     = Math.max(0, Math.min(1, 0.5 + SH_C0 * f0));
+          tempColors[validCount * 3 + 1] = Math.max(0, Math.min(1, 0.5 + SH_C0 * f1));
+          tempColors[validCount * 3 + 2] = Math.max(0, Math.min(1, 0.5 + SH_C0 * f2));
+        } else if (hasRGB) {
+          const rProp = properties.find(p => p.name === 'red');
+          const isFloat = rProp && (rProp.type === 'float' || rProp.type === 'float32');
+          const div = isFloat ? 1.0 : 255.0;
+          tempColors[validCount * 3]     = readProp(vOff, 'red') / div;
+          tempColors[validCount * 3 + 1] = readProp(vOff, 'green') / div;
+          tempColors[validCount * 3 + 2] = readProp(vOff, 'blue') / div;
+        } else if (hasDiffuseRGB) {
+          tempColors[validCount * 3]     = readProp(vOff, 'diffuse_red') / 255.0;
+          tempColors[validCount * 3 + 1] = readProp(vOff, 'diffuse_green') / 255.0;
+          tempColors[validCount * 3 + 2] = readProp(vOff, 'diffuse_blue') / 255.0;
+        } else {
+          tempColors[validCount * 3] = 0.7;
+          tempColors[validCount * 3 + 1] = 0.7;
+          tempColors[validCount * 3 + 2] = 0.7;
+        }
+
+        validCount++;
+      }
+
+      return {
+        positions: tempPositions.slice(0, validCount * 3),
+        colors: tempColors.slice(0, validCount * 3),
+        count: validCount,
+        totalCount: vertexCount,
+        format: formatName,
+        isGaussianSplat
+      };
+    }
+
+    function parseASCII(headerStr, buffer, headerEnd, vertexCount, properties, offsets, isGaussianSplat, hasRGB, hasDiffuseRGB, formatName) {
+      const text = new TextDecoder().decode(new Uint8Array(buffer, headerEnd));
+      const lines = text.trim().split('\n');
+
+      const positions = new Float32Array(vertexCount * 3);
+      const colors = new Float32Array(vertexCount * 3);
+
+      const propNames = properties.map(p => p.name);
+      const xIdx = propNames.indexOf('x');
+      const yIdx = propNames.indexOf('y');
+      const zIdx = propNames.indexOf('z');
+
+      let validCount = 0;
+      for (let i = 0; i < Math.min(vertexCount, lines.length); i++) {
+        const vals = lines[i].trim().split(/\s+/).map(Number);
+        if (vals.length < properties.length) continue;
+
+        positions[validCount * 3] = vals[xIdx];
+        positions[validCount * 3 + 1] = vals[yIdx];
+        positions[validCount * 3 + 2] = vals[zIdx];
+
+        if (isGaussianSplat) {
+          const f0Idx = propNames.indexOf('f_dc_0');
+          const f1Idx = propNames.indexOf('f_dc_1');
+          const f2Idx = propNames.indexOf('f_dc_2');
+          colors[validCount * 3]     = Math.max(0, Math.min(1, 0.5 + SH_C0 * vals[f0Idx]));
+          colors[validCount * 3 + 1] = Math.max(0, Math.min(1, 0.5 + SH_C0 * vals[f1Idx]));
+          colors[validCount * 3 + 2] = Math.max(0, Math.min(1, 0.5 + SH_C0 * vals[f2Idx]));
+        } else if (hasRGB) {
+          const rIdx = propNames.indexOf('red');
+          const gIdx = propNames.indexOf('green');
+          const bIdx = propNames.indexOf('blue');
+          colors[validCount * 3]     = vals[rIdx] / 255;
+          colors[validCount * 3 + 1] = vals[gIdx] / 255;
+          colors[validCount * 3 + 2] = vals[bIdx] / 255;
+        }
+        validCount++;
+      }
+
+      return {
+        positions: positions.slice(0, validCount * 3),
+        colors: colors.slice(0, validCount * 3),
+        count: validCount,
+        totalCount: vertexCount,
+        format: formatName,
+        isGaussianSplat
+      };
+    }
 
     function applyCutaway() {
       if (!pointCloud || !originalPositions) return;
@@ -160,7 +381,6 @@
       const col = geo.attributes.color;
       const n = originalPositions.length / 3;
 
-      // Find Y range
       let yMin = Infinity, yMax = -Infinity;
       for (let i = 0; i < n; i++) {
         const y = originalPositions[i * 3 + 1];
@@ -171,7 +391,6 @@
       const cutY = yMin + (yMax - yMin) * (cutHeight / 100);
 
       if (!cutawayEnabled) {
-        // Restore all points
         pos.array.set(originalPositions);
         if (col && originalColors) col.array.set(originalColors);
         pos.needsUpdate = true;
@@ -181,7 +400,6 @@
         return;
       }
 
-      // Hide points above cutY by moving them far away
       let visCount = 0;
       for (let i = 0; i < n; i++) {
         const y = originalPositions[i * 3 + 1];
@@ -204,79 +422,149 @@
       document.getElementById('stat-cutaway').textContent = `${pct}% (${visCount.toLocaleString()} pts)`;
     }
 
-    function loadPLY(url, filename = 'scene') {
-      loadingEl.style.display = 'flex';
-      loadingStatus.textContent = 'Downloading PLY file...';
+    function displayPointCloud(data, filename) {
+      if (pointCloud) {
+        scene.remove(pointCloud);
+        pointCloud.geometry.dispose();
+        pointCloud.material.dispose();
+      }
 
-      const loader = new PLYLoader();
-      loader.load(url, (geometry) => {
-        loadingStatus.textContent = 'Processing geometry...';
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(data.colors, 3));
 
-        if (pointCloud) {
-          scene.remove(pointCloud);
-          pointCloud.geometry.dispose();
-          pointCloud.material.dispose();
-        }
+      // Center the geometry
+      geometry.computeBoundingBox();
+      const center = new THREE.Vector3();
+      geometry.boundingBox.getCenter(center);
+      geometry.translate(-center.x, -center.y, -center.z);
 
-        geometry.computeBoundingBox();
-        const bbox = geometry.boundingBox;
-        const center = new THREE.Vector3();
-        bbox.getCenter(center);
-        geometry.translate(-center.x, -center.y, -center.z);
+      // Auto point size based on count
+      let autoSize = 2.0;
+      if (data.count > 800000) autoSize = 1.0;
+      else if (data.count > 400000) autoSize = 1.5;
+      else if (data.count > 100000) autoSize = 2.0;
+      else autoSize = 3.0;
 
-        const hasColors = geometry.hasAttribute('color');
-
-        pointMaterial = new THREE.PointsMaterial({
-          size: 2,
-          sizeAttenuation: true,
-          vertexColors: hasColors,
-          color: hasColors ? 0xffffff : 0x4fc3f7,
-        });
-
-        pointCloud = new THREE.Points(geometry, pointMaterial);
-        scene.add(pointCloud);
-
-        // Store original positions for cutaway
-        originalPositions = new Float32Array(geometry.attributes.position.array);
-        if (geometry.hasAttribute('color')) {
-          originalColors = new Float32Array(geometry.attributes.color.array);
-        }
-
-        // Center camera
-        geometry.computeBoundingBox();
-        const newBbox = geometry.boundingBox;
-        const size = new THREE.Vector3();
-        newBbox.getSize(size);
-        const maxDim = Math.max(size.x, size.y, size.z);
-        camera.position.set(maxDim * 0.8, maxDim * 0.6, maxDim * 0.8);
-        controls.target.set(0, 0, 0);
-        controls.update();
-
-        const numPoints = geometry.attributes.position.count;
-        document.getElementById('stat-points').textContent = numPoints.toLocaleString();
-
-        loadingEl.style.display = 'none';
-      }, (progress) => {
-        if (progress.total > 0) {
-          const pct = Math.round(progress.loaded / progress.total * 100);
-          loadingStatus.textContent = `Downloading... ${pct}%`;
-        }
-      }, (error) => {
-        console.error('PLY load error:', error);
-        loadingStatus.textContent = `Error: ${error.message}`;
+      pointMaterial = new THREE.PointsMaterial({
+        size: autoSize,
+        sizeAttenuation: true,
+        vertexColors: true,
       });
+
+      pointCloud = new THREE.Points(geometry, pointMaterial);
+      scene.add(pointCloud);
+
+      // Store for cutaway
+      originalPositions = new Float32Array(data.positions);
+      originalColors = new Float32Array(data.colors);
+
+      // Recenter after translate
+      geometry.computeBoundingBox();
+      const newBbox = geometry.boundingBox;
+      const size = new THREE.Vector3();
+      newBbox.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      camera.position.set(maxDim * 0.8, maxDim * 0.6, maxDim * 0.8);
+      controls.target.set(0, 0, 0);
+      controls.update();
+
+      // Update HUD
+      document.getElementById('stat-points').textContent = data.count.toLocaleString();
+      document.getElementById('stat-source').textContent = filename;
+      document.getElementById('stat-format').textContent = data.format;
+
+      const badge = document.getElementById('format-badge');
+      if (data.isGaussianSplat) {
+        badge.textContent = 'GS';
+        badge.className = 'badge-gs';
+      } else {
+        badge.textContent = 'PC';
+        badge.className = 'badge-pc';
+      }
+
+      document.getElementById('point-size').value = autoSize;
+
+      loadingEl.style.display = 'none';
     }
 
-    // Load default PLY
-    loadPLY('output.ply', 'Room Scan');
+    async function loadFile(source, filename = 'scene') {
+      loadingEl.style.display = 'flex';
+      loadingStatus.textContent = 'Downloading...';
+
+      try {
+        let buffer;
+        if (source instanceof ArrayBuffer) {
+          buffer = source;
+        } else if (source instanceof File) {
+          loadingStatus.textContent = `Reading ${source.name}...`;
+          buffer = await source.arrayBuffer();
+          filename = source.name;
+        } else {
+          // URL
+          const resp = await fetch(source);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const total = parseInt(resp.headers.get('content-length') || '0');
+          if (total > 0) {
+            const reader = resp.body.getReader();
+            const chunks = [];
+            let loaded = 0;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              loaded += value.length;
+              const pct = Math.round(loaded / total * 100);
+              const mb = (loaded / 1024 / 1024).toFixed(1);
+              loadingStatus.textContent = `Downloading... ${pct}% (${mb} MB)`;
+            }
+            const combined = new Uint8Array(loaded);
+            let offset = 0;
+            for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length; }
+            buffer = combined.buffer;
+          } else {
+            buffer = await resp.arrayBuffer();
+          }
+        }
+
+        loadingStatus.textContent = 'Parsing PLY...';
+        await new Promise(r => setTimeout(r, 10)); // yield for UI
+
+        const data = parsePLYBuffer(buffer);
+
+        loadingStatus.textContent = `Rendering ${data.count.toLocaleString()} points...`;
+        await new Promise(r => setTimeout(r, 10));
+
+        displayPointCloud(data, filename);
+      } catch (err) {
+        console.error('Load error:', err);
+        loadingStatus.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    // Load default PLY (try output.ply)
+    loadFile('output.ply', 'scene');
 
     // File upload
     document.getElementById('file-upload').addEventListener('change', (e) => {
       const file = e.target.files[0];
       if (!file) return;
-      const url = URL.createObjectURL(file);
-      document.getElementById('stat-source').textContent = file.name;
-      loadPLY(url, file.name);
+      loadFile(file);
+    });
+
+    // Drag and drop
+    const dropZone = document.getElementById('drop-zone');
+    document.body.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.display = 'flex'; });
+    document.body.addEventListener('dragleave', (e) => {
+      if (e.target === dropZone || !document.body.contains(e.relatedTarget)) dropZone.style.display = 'none';
+    });
+    document.body.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.style.display = 'none';
+      const file = e.dataTransfer.files[0];
+      if (file && (file.name.endsWith('.ply') || file.name.endsWith('.splat'))) {
+        loadFile(file);
+      }
     });
 
     // Point size control
@@ -299,7 +587,7 @@
       }
       if (e.key === 'c' || e.key === 'C') {
         cutawayEnabled = !cutawayEnabled;
-        if (cutawayEnabled) cutHeight = 70; // default cut at 70%
+        if (cutawayEnabled) cutHeight = 70;
         document.getElementById('cut-height').value = cutHeight;
         applyCutaway();
       }
