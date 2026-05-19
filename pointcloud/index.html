@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Point Cloud Viewer — Captures 3D</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; color: #fff; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; }
+    #viewer { width: 100vw; height: 100vh; }
+    #hud {
+      position: fixed; top: 16px; left: 16px;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);
+      border-radius: 12px; padding: 16px 20px;
+      font-size: 13px; line-height: 1.8;
+      pointer-events: none; z-index: 10;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    #hud h2 { font-size: 16px; margin-bottom: 6px; font-weight: 600; }
+    #hud .stat { color: rgba(255,255,255,0.6); }
+    #hud .stat b { color: #4fc3f7; font-weight: 500; }
+    #controls-help {
+      position: fixed; bottom: 16px; left: 16px;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);
+      border-radius: 12px; padding: 14px 18px;
+      font-size: 12px; line-height: 1.7;
+      pointer-events: none; z-index: 10;
+      color: rgba(255,255,255,0.5);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    #controls-help kbd {
+      background: rgba(255,255,255,0.15); border-radius: 4px;
+      padding: 1px 6px; font-family: monospace; font-size: 11px;
+      color: rgba(255,255,255,0.8);
+    }
+    #loading {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: #0a0a0a; display: flex; align-items: center;
+      justify-content: center; z-index: 100; flex-direction: column; gap: 16px;
+    }
+    #loading h2 { font-size: 18px; font-weight: 400; }
+    .spinner {
+      width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.15);
+      border-top-color: #4fc3f7; border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-status { color: rgba(255,255,255,0.5); font-size: 13px; }
+    #upload-btn {
+      position: fixed; top: 16px; right: 16px;
+      background: rgba(79,195,247,0.2); color: #4fc3f7;
+      border: 1px solid rgba(79,195,247,0.3); border-radius: 10px;
+      padding: 10px 18px; cursor: pointer; font-size: 13px;
+      z-index: 10; transition: all 0.2s;
+    }
+    #upload-btn:hover { background: rgba(79,195,247,0.3); }
+    #point-size-ctrl {
+      position: fixed; bottom: 16px; right: 16px;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);
+      border-radius: 12px; padding: 12px 18px;
+      z-index: 10; border: 1px solid rgba(255,255,255,0.1);
+    }
+    #point-size-ctrl label { font-size: 12px; color: rgba(255,255,255,0.6); display: block; margin-bottom: 4px; }
+    #point-size-ctrl input[type=range] { width: 120px; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <h2>Loading Point Cloud</h2>
+    <div id="loading-status">Initializing...</div>
+  </div>
+
+  <div id="viewer"></div>
+
+  <div id="hud">
+    <h2>3D Point Cloud</h2>
+    <div class="stat">Points: <b id="stat-points">--</b></div>
+    <div class="stat">Source: <b id="stat-source">Depth estimation (MiDaS)</b></div>
+    <div class="stat">Frames: <b id="stat-frames">17 panoramas (360°)</b></div>
+  </div>
+
+  <div id="controls-help">
+    <kbd>Left drag</kbd> Rotate &nbsp;
+    <kbd>Right drag</kbd> Pan &nbsp;
+    <kbd>Scroll</kbd> Zoom &nbsp;
+    <kbd>R</kbd> Reset view
+  </div>
+
+  <button id="upload-btn" onclick="document.getElementById('file-upload').click()">
+    📂 Upload PLY
+    <input type="file" id="file-upload" accept=".ply" hidden>
+  </button>
+
+  <div id="point-size-ctrl">
+    <label>Point Size</label>
+    <input type="range" id="point-size" min="0.5" max="8" step="0.5" value="2">
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+
+    const container = document.getElementById('viewer');
+    const loadingEl = document.getElementById('loading');
+    const loadingStatus = document.getElementById('loading-status');
+
+    // Scene setup
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a0a);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+    camera.position.set(5, 8, 5);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.target.set(0, 0, 0);
+
+    // Grid helper
+    const grid = new THREE.GridHelper(30, 30, 0x333333, 0x1a1a1a);
+    scene.add(grid);
+
+    // Axes helper
+    const axes = new THREE.AxesHelper(2);
+    scene.add(axes);
+
+    let pointCloud = null;
+    let pointMaterial = null;
+
+    function loadPLY(url, filename = 'scene') {
+      loadingEl.style.display = 'flex';
+      loadingStatus.textContent = 'Downloading PLY file...';
+
+      const loader = new PLYLoader();
+      loader.load(url, (geometry) => {
+        loadingStatus.textContent = 'Processing geometry...';
+
+        if (pointCloud) {
+          scene.remove(pointCloud);
+          pointCloud.geometry.dispose();
+          pointCloud.material.dispose();
+        }
+
+        geometry.computeBoundingBox();
+        const bbox = geometry.boundingBox;
+        const center = new THREE.Vector3();
+        bbox.getCenter(center);
+        geometry.translate(-center.x, -center.y, -center.z);
+
+        const hasColors = geometry.hasAttribute('color');
+
+        pointMaterial = new THREE.PointsMaterial({
+          size: 2,
+          sizeAttenuation: true,
+          vertexColors: hasColors,
+          color: hasColors ? 0xffffff : 0x4fc3f7,
+        });
+
+        pointCloud = new THREE.Points(geometry, pointMaterial);
+        scene.add(pointCloud);
+
+        // Center camera
+        geometry.computeBoundingBox();
+        const newBbox = geometry.boundingBox;
+        const size = new THREE.Vector3();
+        newBbox.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        camera.position.set(maxDim * 0.8, maxDim * 0.6, maxDim * 0.8);
+        controls.target.set(0, 0, 0);
+        controls.update();
+
+        const numPoints = geometry.attributes.position.count;
+        document.getElementById('stat-points').textContent = numPoints.toLocaleString();
+
+        loadingEl.style.display = 'none';
+      }, (progress) => {
+        if (progress.total > 0) {
+          const pct = Math.round(progress.loaded / progress.total * 100);
+          loadingStatus.textContent = `Downloading... ${pct}%`;
+        }
+      }, (error) => {
+        console.error('PLY load error:', error);
+        loadingStatus.textContent = `Error: ${error.message}`;
+      });
+    }
+
+    // Load default PLY
+    loadPLY('output.ply', 'Room Scan');
+
+    // File upload
+    document.getElementById('file-upload').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      document.getElementById('stat-source').textContent = file.name;
+      loadPLY(url, file.name);
+    });
+
+    // Point size control
+    document.getElementById('point-size').addEventListener('input', (e) => {
+      if (pointMaterial) pointMaterial.size = parseFloat(e.target.value);
+    });
+
+    // Reset view
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'r' || e.key === 'R') {
+        if (pointCloud) {
+          const bbox = pointCloud.geometry.boundingBox;
+          const size = new THREE.Vector3();
+          bbox.getSize(size);
+          const maxDim = Math.max(size.x, size.y, size.z);
+          camera.position.set(maxDim * 0.8, maxDim * 0.6, maxDim * 0.8);
+          controls.target.set(0, 0, 0);
+        }
+      }
+    });
+
+    // Resize handler
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Render loop
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
