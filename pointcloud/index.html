@@ -75,15 +75,18 @@
   <div id="hud">
     <h2>3D Point Cloud</h2>
     <div class="stat">Points: <b id="stat-points">--</b></div>
-    <div class="stat">Source: <b id="stat-source">Depth estimation (MiDaS)</b></div>
-    <div class="stat">Frames: <b id="stat-frames">17 panoramas (360°)</b></div>
+    <div class="stat">Source: <b id="stat-source">Depth Anything V2</b></div>
+    <div class="stat">Frames: <b id="stat-frames">1 panorama (360°)</b></div>
+    <div class="stat">Cutaway: <b id="stat-cutaway">OFF</b></div>
   </div>
 
   <div id="controls-help">
     <kbd>Left drag</kbd> Rotate &nbsp;
     <kbd>Right drag</kbd> Pan &nbsp;
     <kbd>Scroll</kbd> Zoom &nbsp;
-    <kbd>R</kbd> Reset view
+    <kbd>R</kbd> Reset &nbsp;
+    <kbd>C</kbd> Cutaway &nbsp;
+    <kbd>↑↓</kbd> Cut height
   </div>
 
   <button id="upload-btn" onclick="document.getElementById('file-upload').click()">
@@ -94,6 +97,9 @@
   <div id="point-size-ctrl">
     <label>Point Size</label>
     <input type="range" id="point-size" min="0.5" max="8" step="0.5" value="2">
+    <label style="margin-top:8px">Cut Height</label>
+    <input type="range" id="cut-height" min="-100" max="100" step="1" value="100">
+    <button id="cutaway-btn" style="margin-top:8px;width:100%;padding:6px;background:rgba(79,195,247,0.2);color:#4fc3f7;border:1px solid rgba(79,195,247,0.3);border-radius:6px;cursor:pointer;font-size:12px">Toggle Cutaway (C)</button>
   </div>
 
   <script type="importmap">
@@ -141,6 +147,62 @@
 
     let pointCloud = null;
     let pointMaterial = null;
+    let cutawayEnabled = false;
+    let cutHeight = 100; // percentage, 100 = no cut
+    let originalPositions = null;
+    let originalColors = null;
+    let clippingPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 100);
+
+    function applyCutaway() {
+      if (!pointCloud || !originalPositions) return;
+      const geo = pointCloud.geometry;
+      const pos = geo.attributes.position;
+      const col = geo.attributes.color;
+      const n = originalPositions.length / 3;
+
+      // Find Y range
+      let yMin = Infinity, yMax = -Infinity;
+      for (let i = 0; i < n; i++) {
+        const y = originalPositions[i * 3 + 1];
+        if (y < yMin) yMin = y;
+        if (y > yMax) yMax = y;
+      }
+
+      const cutY = yMin + (yMax - yMin) * (cutHeight / 100);
+
+      if (!cutawayEnabled) {
+        // Restore all points
+        pos.array.set(originalPositions);
+        if (col && originalColors) col.array.set(originalColors);
+        pos.needsUpdate = true;
+        if (col) col.needsUpdate = true;
+        geo.setDrawRange(0, n);
+        document.getElementById('stat-cutaway').textContent = 'OFF';
+        return;
+      }
+
+      // Hide points above cutY by moving them far away
+      let visCount = 0;
+      for (let i = 0; i < n; i++) {
+        const y = originalPositions[i * 3 + 1];
+        if (y <= cutY) {
+          pos.array[visCount * 3] = originalPositions[i * 3];
+          pos.array[visCount * 3 + 1] = originalPositions[i * 3 + 1];
+          pos.array[visCount * 3 + 2] = originalPositions[i * 3 + 2];
+          if (col && originalColors) {
+            col.array[visCount * 3] = originalColors[i * 3];
+            col.array[visCount * 3 + 1] = originalColors[i * 3 + 1];
+            col.array[visCount * 3 + 2] = originalColors[i * 3 + 2];
+          }
+          visCount++;
+        }
+      }
+      geo.setDrawRange(0, visCount);
+      pos.needsUpdate = true;
+      if (col) col.needsUpdate = true;
+      const pct = Math.round(cutHeight);
+      document.getElementById('stat-cutaway').textContent = `${pct}% (${visCount.toLocaleString()} pts)`;
+    }
 
     function loadPLY(url, filename = 'scene') {
       loadingEl.style.display = 'flex';
@@ -173,6 +235,12 @@
 
         pointCloud = new THREE.Points(geometry, pointMaterial);
         scene.add(pointCloud);
+
+        // Store original positions for cutaway
+        originalPositions = new Float32Array(geometry.attributes.position.array);
+        if (geometry.hasAttribute('color')) {
+          originalColors = new Float32Array(geometry.attributes.color.array);
+        }
 
         // Center camera
         geometry.computeBoundingBox();
@@ -216,8 +284,9 @@
       if (pointMaterial) pointMaterial.size = parseFloat(e.target.value);
     });
 
-    // Reset view
+    // Keyboard controls
     window.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
       if (e.key === 'r' || e.key === 'R') {
         if (pointCloud) {
           const bbox = pointCloud.geometry.boundingBox;
@@ -228,6 +297,34 @@
           controls.target.set(0, 0, 0);
         }
       }
+      if (e.key === 'c' || e.key === 'C') {
+        cutawayEnabled = !cutawayEnabled;
+        if (cutawayEnabled) cutHeight = 70; // default cut at 70%
+        document.getElementById('cut-height').value = cutHeight;
+        applyCutaway();
+      }
+      if (e.key === 'ArrowUp') {
+        cutHeight = Math.min(100, cutHeight + 3);
+        document.getElementById('cut-height').value = cutHeight;
+        if (cutawayEnabled) applyCutaway();
+      }
+      if (e.key === 'ArrowDown') {
+        cutHeight = Math.max(10, cutHeight - 3);
+        document.getElementById('cut-height').value = cutHeight;
+        if (cutawayEnabled) applyCutaway();
+      }
+    });
+
+    // Cutaway controls
+    document.getElementById('cut-height').addEventListener('input', (e) => {
+      cutHeight = parseFloat(e.target.value);
+      if (cutawayEnabled) applyCutaway();
+    });
+    document.getElementById('cutaway-btn').addEventListener('click', () => {
+      cutawayEnabled = !cutawayEnabled;
+      if (cutawayEnabled && cutHeight >= 100) cutHeight = 70;
+      document.getElementById('cut-height').value = cutHeight;
+      applyCutaway();
     });
 
     // Resize handler
