@@ -768,10 +768,32 @@ async function main() {
   const loadUrl = async (url) => {
     document.getElementById("v-source").textContent = url.split("/").pop();
     document.getElementById("spinner").style.display = "flex";
-    document.getElementById("spinner-text").textContent = "Loading...";
+    document.getElementById("spinner-text").textContent = "Downloading...";
+    const progressBar = document.getElementById("progress-bar");
+    progressBar.style.width = "0%";
     const resp = await fetch(url, { mode: "cors", credentials: "omit" });
     if (!resp.ok) throw new Error(resp.status + " " + resp.statusText);
-    const data = new Uint8Array(await resp.arrayBuffer());
+    const contentLength = +resp.headers.get("Content-Length") || 0;
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (contentLength) {
+        const pct = Math.round((received / contentLength) * 100);
+        progressBar.style.width = pct + "%";
+        document.getElementById("spinner-text").textContent = "Downloading... " + pct + "% (" + (received / 1048576).toFixed(1) + " MB)";
+      }
+    }
+    progressBar.style.width = "100%";
+    document.getElementById("spinner-text").textContent = "Processing...";
+    const combined = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length; }
+    const data = combined;
     if (isPly(data)) {
       document.getElementById("format-badge").textContent = "GS";
       worker.postMessage({ ply: data.buffer });
