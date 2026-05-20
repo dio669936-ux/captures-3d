@@ -1,0 +1,23 @@
+[project]
+name = "captures-3d-backend"
+version = "0.1.0"
+description = "Backend for Captures 3D — video to Gaussian Splat pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+    "aiofiles>=24.1.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "nerfstudio>=1.1.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

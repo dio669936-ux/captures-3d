@@ -1,1 +1,5 @@
 node_modules/\n.DS_Store\n*.pyc\n__pycache__/\n.env\noutput/\ndata/\n*.ply\n*.splat\n*.ksplat\n*.spz
+
+__pycache__/
+*.egg-info/
+*.pyc

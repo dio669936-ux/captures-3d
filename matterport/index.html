@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Matterport-Style 3D Tour</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111; color: #fff; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; }
+
+    #canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+
+    /* Overlay UI */
+    .overlay { position: fixed; z-index: 10; pointer-events: none; }
+    .overlay > * { pointer-events: auto; }
+
+    /* Mode tabs */
+    #mode-tabs {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
+      display: flex; gap: 0;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);
+      border-radius: 10px; overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .mode-btn {
+      padding: 10px 22px; cursor: pointer; font-size: 13px;
+      color: rgba(255,255,255,0.6); border: none; background: none;
+      transition: all 0.2s; font-weight: 500;
+    }
+    .mode-btn.active { background: rgba(79,195,247,0.3); color: #4fc3f7; }
+    .mode-btn:hover { color: #fff; }
+
+    /* Info panels */
+    .info-panel {
+      background: rgba(0,0,0,0.75); backdrop-filter: blur(8px);
+      border-radius: 10px; padding: 10px 16px; font-size: 12px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    #dh-info { position: fixed; top: 12px; left: 12px; z-index: 10; }
+    #dh-info h3 { font-size: 14px; margin-bottom: 2px; }
+    #dh-info .sub { color: rgba(255,255,255,0.5); }
+
+    /* Navigation */
+    #nav-bar {
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 10;
+      display: flex; gap: 10px; align-items: center;
+      background: rgba(0,0,0,0.75); backdrop-filter: blur(8px);
+      border-radius: 12px; padding: 10px 20px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .nav-btn {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+      color: #fff; border-radius: 8px; padding: 8px 16px; cursor: pointer;
+      font-size: 13px; transition: all 0.2s;
+    }
+    .nav-btn:hover { background: rgba(255,255,255,0.2); }
+    .nav-btn:disabled { opacity: 0.3; cursor: default; }
+    #vp-label { color: rgba(255,255,255,0.7); font-size: 14px; min-width: 80px; text-align: center; }
+
+    /* Cut height control */
+    #cut-panel {
+      position: fixed; bottom: 16px; left: 12px; z-index: 10;
+    }
+    #cut-panel label { color: rgba(255,255,255,0.5); display: block; margin-bottom: 4px; font-size: 11px; }
+    #cut-panel input { width: 120px; }
+    #cut-panel .val { color: #4fc3f7; font-size: 11px; margin-top: 2px; }
+
+    /* Thumbnails strip */
+    #thumb-strip {
+      position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%); z-index: 10;
+      display: flex; gap: 4px; max-width: 80vw; overflow-x: auto;
+      background: rgba(0,0,0,0.6); border-radius: 10px; padding: 6px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .thumb {
+      width: 60px; height: 30px; border-radius: 4px; cursor: pointer;
+      object-fit: cover; opacity: 0.5; transition: all 0.2s;
+      border: 2px solid transparent;
+    }
+    .thumb:hover { opacity: 0.8; }
+    .thumb.active { opacity: 1; border-color: #4fc3f7; }
+
+    /* Loading */
+    #loading {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: #111; display: flex; align-items: center;
+      justify-content: center; z-index: 100; flex-direction: column; gap: 12px;
+    }
+    .spinner { width: 36px; height: 36px; border: 3px solid rgba(255,255,255,0.15);
+      border-top-color: #4fc3f7; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-status { color: rgba(255,255,255,0.5); font-size: 13px; }
+
+    /* Hidden when not in that mode */
+    .dh-only { display: none; }
+    body.mode-dollhouse .dh-only { display: block; }
+    body.mode-dollhouse .pano-only { display: none; }
+    body.mode-pano .pano-only { display: block; }
+    body.mode-pano .dh-only { display: none; }
+  </style>
+</head>
+<body class="mode-pano">
+  <div id="loading">
+    <div class="spinner"></div>
+    <h2 style="font-size:16px;font-weight:400">Building 3D Scene</h2>
+    <div id="loading-status">Loading scene data...</div>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <!-- Mode tabs -->
+  <div id="mode-tabs">
+    <button class="mode-btn" id="btn-pano-mode" onclick="setMode('pano')">Panorama</button>
+    <button class="mode-btn active" id="btn-dh-mode" onclick="setMode('dollhouse')">Dollhouse</button>
+  </div>
+
+  <!-- Dollhouse info -->
+  <div id="dh-info" class="info-panel dh-only">
+    <h3>Dollhouse View</h3>
+    <div class="sub" id="mesh-stats">Loading...</div>
+  </div>
+
+  <!-- Cut height (dollhouse only) -->
+  <div id="cut-panel" class="info-panel dh-only">
+    <label>Cut Height (Roof)</label>
+    <input type="range" id="cut-slider" min="20" max="100" value="60">
+    <div class="val" id="cut-val">60%</div>
+  </div>
+
+  <!-- Thumbnail strip -->
+  <div id="thumb-strip"></div>
+
+  <!-- Navigation -->
+  <div id="nav-bar">
+    <button class="nav-btn" id="btn-prev" disabled onclick="goPrev()">&#9664;</button>
+    <span id="vp-label">1 / 17</span>
+    <button class="nav-btn" id="btn-next" onclick="goNext()">&#9654;</button>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+
+    // === SHARED STATE ===
+    let sceneData = null;
+    let currentVP = 0;
+    let mode = 'dollhouse'; // 'pano' or 'dollhouse'
+
+    // === SINGLE RENDERER ===
+    const canvas = document.getElementById('canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.autoClear = false;
+
+    // === DOLLHOUSE SCENE ===
+    const dhScene = new THREE.Scene();
+    dhScene.background = new THREE.Color(0x0a0a0a);
+    dhScene.add(new THREE.GridHelper(20, 20, 0x222222, 0x151515));
+    dhScene.add(new THREE.AmbientLight(0xffffff, 0.9));
+
+    const dhCamera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+    dhCamera.position.set(8, 12, 8);
+    const dhControls = new OrbitControls(dhCamera, canvas);
+    dhControls.enableDamping = true;
+    dhControls.dampingFactor = 0.08;
+    dhControls.enabled = true;
+
+    let meshObject = null;
+    let originalPositions = null;
+    let hotspotGroup = new THREE.Group();
+    dhScene.add(hotspotGroup);
+
+    // === PANORAMA SCENE ===
+    const panoScene = new THREE.Scene();
+    panoScene.background = new THREE.Color(0x000000);
+
+    const panoCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    panoCamera.position.set(0, 0, 0.01);
+    const panoControls = new OrbitControls(panoCamera, canvas);
+    panoControls.enableZoom = false;
+    panoControls.enablePan = false;
+    panoControls.rotateSpeed = -0.3;
+    panoControls.enableDamping = true;
+    panoControls.enabled = false;
+
+    let panoSphere = null;
+
+    // === MODE SWITCHING ===
+    window.setMode = function(m) {
+      mode = m;
+      document.body.className = `mode-${m}`;
+
+      document.getElementById('btn-pano-mode').classList.toggle('active', m === 'pano');
+      document.getElementById('btn-dh-mode').classList.toggle('active', m === 'dollhouse');
+
+      dhControls.enabled = (m === 'dollhouse');
+      panoControls.enabled = (m === 'pano');
+    };
+
+    // Start with dollhouse
+    setMode('dollhouse');
+
+    // === LOAD SCENE ===
+    async function loadScene() {
+      const loadEl = document.getElementById('loading');
+      const statusEl = document.getElementById('loading-status');
+
+      try {
+        statusEl.textContent = 'Loading scene data...';
+        const resp = await fetch('scene.json');
+        sceneData = await resp.json();
+      } catch (e) {
+        statusEl.textContent = 'scene.json not found';
+        return;
+      }
+
+      // Build thumbnail strip
+      const strip = document.getElementById('thumb-strip');
+      sceneData.viewpoints.forEach((vp, idx) => {
+        const img = document.createElement('img');
+        img.src = `panoramas/${vp.image}`;
+        img.className = 'thumb' + (idx === 0 ? ' active' : '');
+        img.onclick = () => goToVP(idx);
+        img.title = `Viewpoint ${idx + 1}`;
+        strip.appendChild(img);
+      });
+
+      // Load PLY as POINTS (not mesh to save GPU)
+      statusEl.textContent = 'Loading 3D mesh...';
+      const loader = new PLYLoader();
+      loader.load('scene.ply', (geometry) => {
+        statusEl.textContent = 'Processing...';
+
+        geometry.computeBoundingBox();
+        const center = new THREE.Vector3();
+        geometry.boundingBox.getCenter(center);
+        geometry.translate(-center.x, 0, -center.z);
+
+        const hasColors = geometry.hasAttribute('color');
+        const material = new THREE.PointsMaterial({
+          size: 0.08,
+          sizeAttenuation: true,
+          vertexColors: hasColors,
+        });
+        meshObject = new THREE.Points(geometry, material);
+        dhScene.add(meshObject);
+
+        originalPositions = new Float32Array(geometry.attributes.position.array);
+
+        // Fit camera
+        geometry.computeBoundingBox();
+        const size = new THREE.Vector3();
+        geometry.boundingBox.getSize(size);
+        const maxDim = Math.max(size.x, size.z);
+        dhCamera.position.set(maxDim * 0.6, maxDim * 0.9, maxDim * 0.6);
+        dhControls.target.set(0, size.y * 0.2, 0);
+
+        const nVerts = geometry.attributes.position.count;
+        document.getElementById('mesh-stats').textContent =
+          `${nVerts.toLocaleString()} points from 17 viewpoints`;
+
+        // Hotspots
+        createHotspots(center);
+
+        // Apply cutaway
+        applyCutaway(60);
+
+        // Load first panorama
+        goToVP(0);
+
+        loadEl.style.display = 'none';
+      }, (progress) => {
+        if (progress.total > 0) {
+          statusEl.textContent = `Loading mesh... ${Math.round(progress.loaded / progress.total * 100)}%`;
+        }
+      }, (error) => {
+        console.error('PLY error:', error);
+        statusEl.textContent = 'Loading panoramas...';
+        createHotspots(new THREE.Vector3());
+        goToVP(0);
+        setTimeout(() => { loadEl.style.display = 'none'; }, 500);
+      });
+    }
+
+    function createHotspots(meshCenter) {
+      if (!sceneData) return;
+      hotspotGroup.clear();
+
+      sceneData.viewpoints.forEach((vp, idx) => {
+        const x = (vp.position?.x || 0) - meshCenter.x;
+        const z = (vp.position?.z || 0) - meshCenter.z;
+
+        // Hotspot dot
+        const geo = new THREE.SphereGeometry(0.18, 12, 12);
+        const mat = new THREE.MeshBasicMaterial({
+          color: idx === 0 ? 0xff7043 : 0x4fc3f7,
+          transparent: true,
+          opacity: 0.9,
+        });
+        const dot = new THREE.Mesh(geo, mat);
+        dot.position.set(x, 0.15, z);
+        dot.userData = { vpIdx: idx };
+        hotspotGroup.add(dot);
+
+        // Ring pulse
+        const ringGeo = new THREE.RingGeometry(0.2, 0.28, 24);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: 0x4fc3f7, side: THREE.DoubleSide,
+          transparent: true, opacity: 0.3,
+        });
+        const ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.set(x, 0.02, z);
+        ring.userData = { vpIdx: idx, isRing: true };
+        hotspotGroup.add(ring);
+
+        // Number label
+        const cnv = document.createElement('canvas');
+        cnv.width = 64; cnv.height = 32;
+        const ctx = cnv.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 20px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(idx + 1), 32, 22);
+        const tex = new THREE.CanvasTexture(cnv);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+        sprite.position.set(x, 0.6, z);
+        sprite.scale.set(0.5, 0.25, 1);
+        hotspotGroup.add(sprite);
+      });
+
+      // Draw path lines
+      const pathPts = sceneData.viewpoints.map((vp, i) => {
+        const x = (vp.position?.x || 0) - meshCenter.x;
+        const z = (vp.position?.z || 0) - meshCenter.z;
+        return new THREE.Vector3(x, 0.05, z);
+      });
+      if (pathPts.length > 1) {
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(pathPts);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.3 });
+        dhScene.add(new THREE.Line(lineGeo, lineMat));
+      }
+    }
+
+    function updateHotspots() {
+      hotspotGroup.children.forEach(child => {
+        if (child.userData.vpIdx !== undefined && !child.userData.isRing) {
+          const active = child.userData.vpIdx === currentVP;
+          if (child.material && child.material.color) {
+            child.material.color.setHex(active ? 0xff7043 : 0x4fc3f7);
+          }
+        }
+      });
+    }
+
+    // === PANORAMA ===
+    function goToVP(idx) {
+      if (!sceneData || idx < 0 || idx >= sceneData.viewpoints.length) return;
+      currentVP = idx;
+
+      const vp = sceneData.viewpoints[idx];
+      const imgPath = `panoramas/${vp.image}`;
+
+      new THREE.TextureLoader().load(imgPath, (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+
+        if (panoSphere) {
+          panoScene.remove(panoSphere);
+          panoSphere.geometry.dispose();
+          panoSphere.material.dispose();
+        }
+
+        const geo = new THREE.SphereGeometry(50, 64, 32);
+        geo.scale(-1, 1, 1);
+        panoSphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: texture }));
+        panoScene.add(panoSphere);
+      });
+
+      // UI updates
+      document.getElementById('vp-label').textContent = `${idx + 1} / ${sceneData.viewpoints.length}`;
+      document.getElementById('btn-prev').disabled = idx === 0;
+      document.getElementById('btn-next').disabled = idx === sceneData.viewpoints.length - 1;
+
+      // Thumbnails
+      document.querySelectorAll('.thumb').forEach((t, i) => {
+        t.classList.toggle('active', i === idx);
+      });
+
+      updateHotspots();
+    }
+
+    window.goPrev = () => goToVP(currentVP - 1);
+    window.goNext = () => goToVP(currentVP + 1);
+
+    // === CUTAWAY ===
+    function applyCutaway(pct) {
+      if (!meshObject || !originalPositions) return;
+      const pos = meshObject.geometry.attributes.position;
+      const n = originalPositions.length / 3;
+
+      let yMin = Infinity, yMax = -Infinity;
+      for (let i = 0; i < n; i++) {
+        const y = originalPositions[i * 3 + 1];
+        if (y < yMin) yMin = y;
+        if (y > yMax) yMax = y;
+      }
+
+      const cutY = yMin + (yMax - yMin) * (pct / 100);
+      for (let i = 0; i < n; i++) {
+        const y = originalPositions[i * 3 + 1];
+        if (y > cutY) {
+          pos.array[i * 3] = 0;
+          pos.array[i * 3 + 1] = -999;
+          pos.array[i * 3 + 2] = 0;
+        } else {
+          pos.array[i * 3] = originalPositions[i * 3];
+          pos.array[i * 3 + 1] = originalPositions[i * 3 + 1];
+          pos.array[i * 3 + 2] = originalPositions[i * 3 + 2];
+        }
+      }
+      pos.needsUpdate = true;
+      document.getElementById('cut-val').textContent = `${pct}%`;
+    }
+
+    document.getElementById('cut-slider').addEventListener('input', (e) => {
+      applyCutaway(parseFloat(e.target.value));
+    });
+
+    // === HOTSPOT CLICK ===
+    const raycaster = new THREE.Raycaster();
+    const mouseVec = new THREE.Vector2();
+
+    canvas.addEventListener('click', (e) => {
+      if (mode !== 'dollhouse') return;
+      mouseVec.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouseVec.y = -(e.clientY / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouseVec, dhCamera);
+      const hits = raycaster.intersectObjects(hotspotGroup.children);
+      if (hits.length > 0) {
+        const obj = hits[0].object;
+        if (obj.userData.vpIdx !== undefined) {
+          goToVP(obj.userData.vpIdx);
+          setMode('pano');
+        }
+      }
+    });
+
+    // === KEYBOARD ===
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') goToVP(currentVP - 1);
+      if (e.key === 'ArrowRight') goToVP(currentVP + 1);
+      if (e.key === 'd' || e.key === 'D') setMode('dollhouse');
+      if (e.key === 'p' || e.key === 'P') setMode('pano');
+    });
+
+    // === RESIZE ===
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      dhCamera.aspect = window.innerWidth / window.innerHeight;
+      dhCamera.updateProjectionMatrix();
+      panoCamera.aspect = window.innerWidth / window.innerHeight;
+      panoCamera.updateProjectionMatrix();
+    });
+
+    // === RENDER LOOP ===
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.clear();
+
+      if (mode === 'dollhouse') {
+        dhControls.update();
+        renderer.render(dhScene, dhCamera);
+      } else {
+        panoControls.update();
+        renderer.render(panoScene, panoCamera);
+      }
+    }
+
+    // === INIT ===
+    loadScene();
+    animate();
+  </script>
+</body>
+</html>
